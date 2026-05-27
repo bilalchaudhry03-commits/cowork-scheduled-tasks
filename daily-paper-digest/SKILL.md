@@ -1,9 +1,9 @@
 ---
 name: daily-paper-digest
-description: Daily digest of new publications across your research topics, delivered via Slack DM with deduplication
+description: Daily digest of new publications across your research topics, delivered via Slack DM with deduplication and Zotero upload
 ---
 
-Search for new papers across your research tracks and send a daily digest to your Slack DM. Tracks duplicates across runs so you never see the same paper twice.
+Search for new papers across your research tracks and send a daily digest to your Slack DM. Tracks duplicates across runs so you never see the same paper twice. Automatically uploads all papers to a Zotero collection.
 
 ## Setup — Customize These Values
 
@@ -14,6 +14,10 @@ Before using this task, replace the following placeholders:
 | `[YOUR_SLACK_USER_ID]` | Your Slack user ID (e.g. `U0ACAU48XQB`) — find it in your Slack profile |
 | `[YOUR_SLACK_WORKSPACE]` | Your Slack workspace name |
 | `[YOUR_LOG_PATH]` | Local folder for logs and the dedup file (e.g. `C:\Users\you\Documents\logs`) |
+| `[YOUR_ZOTERO_USER_ID]` | Your Zotero user ID — find it at zotero.org/settings/keys |
+| `[YOUR_ZOTERO_COLLECTION_KEY]` | The 8-character key of the Zotero collection to save papers into |
+
+Set `ZOTERO_API_KEY` as an environment variable with your Zotero API key (from zotero.org/settings/keys).
 
 Then edit the **Search Topics** section below to match your research interests.
 
@@ -21,7 +25,7 @@ Then edit the **Search Topics** section below to match your research interests.
 - Slack MCP connector (`send_message` tool) — for delivering the digest. Do NOT use ToolSearch to find it; use it directly.
 - bioRxiv MCP (`search_preprints`) — for preprint search
 - PubMed MCP (`search_articles`, `get_article_metadata`) — for journal search
-- Windows PowerShell — for reading/writing the dedup log
+- Windows PowerShell — for reading/writing the dedup log and uploading to Zotero
 
 ## Deduplication — MUST DO FIRST
 
@@ -144,6 +148,59 @@ $newUrls = @(
 )
 $newUrls | Add-Content -Path $seenPath -Encoding utf8
 ```
+
+## Save to Zotero
+
+After updating the dedup log, add each paper to your Zotero collection via the web API. The API key is read from the `ZOTERO_API_KEY` environment variable.
+
+Build an array of item objects and POST in a single request. Use `itemType: "preprint"` for bioRxiv/medRxiv papers and `itemType: "journalArticle"` for published papers.
+
+```powershell
+$zoteroKey = $env:ZOTERO_API_KEY
+$zoteroUrl = "https://api.zotero.org/users/[YOUR_ZOTERO_USER_ID]/items"
+
+# Build one hashtable per paper sent in the digest
+$zoteroItems = @(
+    @{
+        itemType     = "preprint"          # or "journalArticle" for published papers
+        title        = "Full Paper Title"
+        url          = "https://..."
+        date         = "2026-05-27"        # YYYY-MM-DD
+        abstractNote = "One-sentence summary from the digest (or full abstract if available)"
+        collections  = @("[YOUR_ZOTERO_COLLECTION_KEY]")
+        tags         = @(
+            @{ tag = "AI Digest" }
+            @{ tag = "[Track Name]" }      # e.g. "NPC & Transport", "Proteomics & MS"
+        )
+        # For preprints:  repository = "bioRxiv"
+        # For articles:   publicationTitle = "Nature Cell Biology"
+        # Include if known: DOI = "10.xxxx/..."
+    }
+    # ... one entry per paper across all tracks
+)
+
+$body = ConvertTo-Json -InputObject @($zoteroItems) -Depth 5
+
+try {
+    $resp = Invoke-RestMethod -Uri $zoteroUrl -Method Post `
+        -Headers @{
+            "Zotero-API-Key"     = $zoteroKey
+            "Zotero-API-Version" = "3"
+            "Content-Type"       = "application/json"
+        } `
+        -Body $body
+    $nAdded = ($resp.successful | Get-Member -MemberType NoteProperty).Count
+    Write-Host "Zotero: $nAdded item(s) added to collection"
+} catch {
+    $errPath = "[YOUR_LOG_PATH]\paper-digest-errors.log"
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm') -- Zotero upload failed: $_" | Add-Content -Path $errPath -Encoding utf8
+}
+```
+
+**Rules:**
+- Tag each item with `"AI Digest"` plus the track name
+- `abstractNote`: use the actual abstract if retrieved; otherwise use the one-sentence digest summary
+- Zotero upload failure is **non-blocking** — log it but do not withhold the dedup log update or retry
 
 ## Failure Handling
 
